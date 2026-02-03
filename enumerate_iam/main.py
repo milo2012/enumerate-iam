@@ -71,7 +71,10 @@ def enumerate_using_bruteforce(access_key, secret_key, session_token, region):
     args_generator = generate_args(access_key, secret_key, session_token, region)
 
     try:
+        logger.info("Submitting brute-force jobs to thread pool...")
         results = pool.map(check_one_permission, args_generator)
+        logger.info("All brute-force jobs completed")
+
     except KeyboardInterrupt:
         print('')
 
@@ -124,10 +127,13 @@ def get_client(access_key, secret_key, session_token, service_name, region):
     logger = logging.getLogger()
     logger.debug('Getting client for %s in region %s' % (service_name, region))
 
-    config = Config(connect_timeout=5,
-                    read_timeout=5,
-                    retries={'max_attempts': 30},
-                    max_pool_connections=MAX_POOL_CONNECTIONS * 2)
+    config = Config(
+        connect_timeout=3,
+        read_timeout=3,
+        retries={'max_attempts': 1},
+        max_pool_connections=MAX_POOL_CONNECTIONS * 2
+    )
+
 
     try:
         client = boto3.client(
@@ -152,59 +158,51 @@ def check_one_permission(arg_tuple):
     access_key, secret_key, session_token, region, service_name, operation_name = arg_tuple
     logger = logging.getLogger()
 
+    logger.debug("START %s.%s", service_name, operation_name)
+
     service_client = get_client(access_key, secret_key, session_token, service_name, region)
     if service_client is None:
+        logger.debug("NO CLIENT %s.%s", service_name, operation_name)
         return
 
     try:
         action_function = getattr(service_client, operation_name)
     except AttributeError:
-        # The service might not have this action (this is most likely
-        # an error with generate_bruteforce_tests.py)
         logger.error('Remove %s.%s action' % (service_name, operation_name))
         return
-
-    logger.debug('Testing %s.%s() in region %s' % (service_name, operation_name, region))
 
     try:
         action_response = action_function()
     except (botocore.exceptions.ClientError,
             botocore.exceptions.EndpointConnectionError,
             botocore.exceptions.ConnectTimeoutError,
-            botocore.exceptions.ReadTimeoutError):
+            botocore.exceptions.ReadTimeoutError) as e:
+        logger.debug("END %s.%s (ERROR: %s)", service_name, operation_name, type(e).__name__)
         return
     except botocore.exceptions.ParamValidationError:
         logger.error('Remove %s.%s action' % (service_name, operation_name))
         return
 
-    msg = '-- %s.%s() worked!'
-    args = (service_name, operation_name)
-    logger.info(msg % args)
+    logger.info('-- %s.%s() worked!', service_name, operation_name)
+    logger.debug("END %s.%s (SUCCESS)", service_name, operation_name)
 
     key = '%s.%s' % (service_name, operation_name)
-
     return key, remove_metadata(action_response)
 
 
 def configure_logging():
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(process)d - [%(levelname)s] %(message)s',
+        format='%(asctime)s - %(threadName)s - [%(levelname)s] %(message)s',
     )
 
-    # Suppress boto INFO.
-    logging.getLogger('boto3').setLevel(logging.WARNING)
+    # Show AWS retries, HTTP calls and socket behavior
+    logging.getLogger('boto3').setLevel(logging.INFO)
     logging.getLogger('botocore').setLevel(logging.WARNING)
-    logging.getLogger('nose').setLevel(logging.WARNING)
-
-    logging.getLogger("requests").setLevel(logging.WARNING)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger('urllib3').setLevel(logging.INFO)
 
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-    # import botocore.vendored.requests.packages.urllib3 as urllib3
-    urllib3.disable_warnings(botocore.vendored.requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
 
 def enumerate_iam(access_key, secret_key, session_token, region):
